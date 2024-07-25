@@ -1,0 +1,25 @@
+[package]
+name = "tower-otel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7.5"
+tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "signal"] }
+http = "1.1.0"
+tower = "0.4.13"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["std", "env-filter", "json", "fmt", "tracing-log"] }
+tracing-opentelemetry = "0.24.0"
+opentelemetry = { version = "0.23.0", features = ["metrics", "trace"], default-features = false }
+opentelemetry_sdk = { version = "0.23.0", features = ["metrics", "rt-tokio", "logs", "trace"], default-features = false }
+opentelemetry-semantic-conventions = { version = "0.15.0", default-features = false }
+pin-project = "1.1.5"
+thiserror = "1.0.61"
+
+tower-otel-http-metrics = "0.4.0"
+opentelemetry-prometheus = "0.16.0"
+tonic = "0.12.0"
+
+
+

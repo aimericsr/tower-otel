@@ -1,0 +1,41 @@
+[package]
+name = "tonic"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tower-otel = { path = "../../../tower-otel" }
+tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "signal"] }
+tonic-reflection = "0.12.0"
+tonic = "0.12.0"
+tonic-health = "0.12.0"
+prost = "0.13.0"
+serde = { version = "1.0.203", features = ["serde_derive"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["std", "env-filter", "json", "fmt", "tracing-log"] }
+tracing-opentelemetry = "0.24.0"
+opentelemetry = { version = "0.23.0", features = ["metrics", "trace"], default-features = false }
+opentelemetry_sdk = { version = "0.23.0", features = ["metrics", "rt-tokio", "logs", "trace"], default-features = false }
+opentelemetry-otlp = { version = "0.16.0", features = ["metrics", "grpc-tonic", "trace"], default-features = false }
+opentelemetry-semantic-conventions = { version = "0.15.0", default-features = false }
+opentelemetry-stdout  = { version = "0.4.0", features = ["trace"], default-features = false }
+# Test
+tower-otel-http-metrics = "0.4.0"
+opentelemetry-prometheus = "0.16.0"
+tracing-log = "0.2.0"
+log = "0.4.21"
+reqwest = "0.12.4"
+reqwest-middleware = "0.3.1"
+reqwest-retry = "0.6.0"
+reqwest-tracing = { version = "0.5.0", features = ["opentelemetry_0_22"] }
+http = "1.1.0"
+thiserror = "1.0.61"
+hyper = "1.3.1"
+tower = "0.4.13"
+tower-reqwest = "0.3.2"
+anyhow = "1.0.86"
+tower-http = { version = "0.5.2", features = ["cors"] }
+opentelemetry-resource-detectors = "0.2.0"
+
+[build-dependencies]
+tonic-build = "0.12"
