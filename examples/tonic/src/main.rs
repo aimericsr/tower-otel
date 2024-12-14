@@ -19,6 +19,7 @@ mod grpc_manager;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Tracing
     let env_filter = EnvFilter::builder().try_from_env()?;
 
     opentelemetry::global::set_text_map_propagator(
@@ -38,7 +39,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let default_ressources = Resource::new(vec![
         KeyValue::new("service.schema.url", SCHEMA_URL),
-        //KeyValue::new(SERVICE_NAME, "tonic-api"),
+        KeyValue::new(SERVICE_NAME, "tonic-api"),
         KeyValue::new(SERVICE_NAMESPACE, "web-api"),
         KeyValue::new(SERVICE_VERSION, "v0.0.1"),
     ]);
@@ -72,6 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let telemetry_subscriber = tracing_subscriber::Registry::default()
         .with(env_filter)
         .with(otel_trace_subscriber_layer);
+
     tracing::subscriber::set_global_default(telemetry_subscriber)?;
     LogTracer::init()?;
 
@@ -157,10 +159,12 @@ impl GreeterService {
 
 #[tonic::async_trait]
 impl Greeter for GreeterService {
+    #[tracing::instrument]
     async fn say_hello(
         &self,
         request: Request<HelloRequest>,
     ) -> Result<Response<HelloReply>, Status> {
+        tracing::info!("hello from server");
         self.increment_counter();
         println!("Count: {:?}", self.get_counter());
 
