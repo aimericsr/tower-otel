@@ -16,10 +16,9 @@ opentelemetry_sdk = { version = "0.27.1", features = ["metrics", "rt-tokio", "lo
 opentelemetry-semantic-conventions = { version = "0.27.0", default-features = false }
 pin-project = "1.1.7"
 thiserror = "2.0.7"
-
-
 tonic = "0.12.2"
 http-body = "1.0.1"
+opentelemetry-http = "0.27.0"
 
 
 

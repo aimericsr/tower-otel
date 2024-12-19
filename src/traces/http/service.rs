@@ -1,6 +1,6 @@
 use super::extractors::{extract_otel_info_from_req, update_span_on_error, update_span_on_success};
 use http::{Request, Response};
-use opentelemetry::propagation::Extractor;
+use opentelemetry_http::HeaderExtractor;
 use pin_project::pin_project;
 use std::{
     error::Error,
@@ -58,20 +58,12 @@ where
     fn call(&mut self, req: Request<B>) -> Self::Future {
         let span = extract_otel_info_from_req(&req);
 
-        let extractor = HttpHeaderExtractorHeaderExtractor(req.headers());
         let context = opentelemetry::global::get_text_map_propagator(|propagator| {
-            propagator.extract(&extractor)
+            propagator.extract(&HeaderExtractor(req.headers()))
         });
         span.set_parent(context);
 
-        // Do we need to do this ?
-        // Or entering the span only in the poll function is OK ?
-        // let future = {
-        //     let _enter = span.enter();
-        //     self.inner.call(req)
-        // };
         ResponseFuture {
-            //inner: future,
             inner: self.inner.call(req),
             span,
         }
@@ -129,19 +121,4 @@ where
 pub struct OtelError {
     pub types: String,
     pub messages: String,
-}
-
-/// Set the parent trace if it is set in http headers, otherwise the span created is the root one
-struct HttpHeaderExtractorHeaderExtractor<'a>(pub &'a http::HeaderMap);
-
-impl<'a> Extractor for HttpHeaderExtractorHeaderExtractor<'a> {
-    /// Get a value for a key from the `HeaderMap`. If the value is not valid ASCII, returns None.
-    fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).and_then(|value| value.to_str().ok())
-    }
-
-    /// Collect all the keys from the `HeaderMap`.
-    fn keys(&self) -> Vec<&str> {
-        self.0.keys().map(http::HeaderName::as_str).collect()
-    }
 }
