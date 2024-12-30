@@ -3,17 +3,18 @@ use http::{Request, Response};
 use opentelemetry_http::HeaderExtractor;
 use pin_project::pin_project;
 use std::{
-    error::Error,
     fmt::Debug,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
-use tower::{Layer, Service};
+use tower::{BoxError, Layer, Service};
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-/// Layer to add OTEL instrumentation to your axum app
+/// Tower layer to add OTEL traces instrumentation to your axum app
+/// It extract informations from the incoming HTTP request to create a span according to the
+/// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-server)
 #[derive(Default, Debug, Clone)]
 pub struct OtelLoggerLayer;
 
@@ -24,8 +25,6 @@ impl<S> Layer<S> for OtelLoggerLayer {
     }
 }
 
-/// This service extract informations from the incoming HTTP request to create a span according to the
-/// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-server)
 #[derive(Debug, Clone)]
 pub struct OtelLogger<S> {
     inner: S,
@@ -39,10 +38,9 @@ impl<S> OtelLogger<S> {
 
 impl<S, B, B2> Service<Request<B>> for OtelLogger<S>
 where
-    S: Service<Request<B>, Response = Response<B2>> + Clone + Send + 'static,
-    S::Error: Error + 'static,
+    S: Service<Request<B>, Response = Response<B2>>,
+    S::Error: Into<BoxError>,
     S::Future: Send + 'static,
-    B: Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -77,12 +75,12 @@ pub struct ResponseFuture<F> {
     pub span: Span,
 }
 
-impl<Fut, ResBody, E> Future for ResponseFuture<Fut>
+impl<F, B, E> Future for ResponseFuture<F>
 where
-    Fut: Future<Output = Result<Response<ResBody>, E>>,
-    E: std::error::Error + 'static,
+    F: Future<Output = Result<Response<B>, E>>,
+    E: Into<BoxError>,
 {
-    type Output = Result<Response<ResBody>, E>;
+    type Output = Result<Response<B>, E>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
@@ -93,7 +91,7 @@ where
             Poll::Ready(result) => result,
         };
 
-        match result {
+        match result.map_err(Into::into) {
             Ok(mut req) => {
                 if req.status().is_server_error() {
                     // let error = req
@@ -109,7 +107,7 @@ where
                 }
             }
             Err(err) => {
-                unreachable!("The error variant sould never been reached as Axum require all of his services to be Infaillable : {err}");
+                unreachable!("The error variant sould never been reached as Axum require all of his services to be Infaillable : {err:?}");
             }
         }
     }

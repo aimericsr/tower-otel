@@ -1,10 +1,9 @@
 # OTEL tracing for Rust Web Services
 
-Containes otel traces for HTTP(axum) and GRPC(tonic) services. Only servers supported for the moment. 
+Generates metrics and traces using rust opentelmetry sdk. 
 
-Clients will be added later.
+The goal is to provide client(reqwest, tonic) and servers(axum, tonic) implementations.
 
-Follows conventions
 
 https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-server
 

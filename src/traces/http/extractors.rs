@@ -1,11 +1,10 @@
 use axum::extract::{ConnectInfo, MatchedPath};
 use http::{HeaderMap, HeaderValue, Request, Response, Version};
-use opentelemetry::{propagation::Injector, trace::Status};
+use opentelemetry::trace::Status;
+use opentelemetry_http::HeaderInjector;
 use std::net::SocketAddr;
 use tracing::{field::Empty, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-use super::service::OtelError;
 
 pub fn extract_otel_info_from_req<B>(req: &Request<B>) -> Span {
     let request_method = req.method().as_str();
@@ -86,24 +85,14 @@ pub fn update_span_on_error<B>(req: &mut Response<B>, span: &Span) {
 
 fn inject_trace_id(headers: &mut http::HeaderMap) {
     let context = tracing::Span::current().context();
+    // dbg!(
+    //     "trying to inject otel context into http::HeaderMap : {?)",
+    //     &context
+    // );
 
-    let mut injector = HeaderInjector(headers);
     opentelemetry::global::get_text_map_propagator(|propagator| {
-        propagator.inject_context(&context, &mut injector);
+        propagator.inject_context(&context, &mut HeaderInjector(headers));
     });
-}
-
-pub struct HeaderInjector<'a>(pub &'a mut http::HeaderMap);
-
-impl<'a> Injector for HeaderInjector<'a> {
-    /// Set a key and value in the `HeaderMap`. Does nothing if the key or value are not valid inputs.
-    fn set(&mut self, key: &str, value: String) {
-        if let Ok(name) = http::header::HeaderName::from_bytes(key.as_bytes()) {
-            if let Ok(val) = http::header::HeaderValue::from_str(&value) {
-                self.0.insert(name, val);
-            }
-        }
-    }
 }
 
 /// set_attribute is used instead of record so that we can set attribute that were not here at the span creation

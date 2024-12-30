@@ -1,6 +1,7 @@
 use super::extractors::{extract_otel_info_from_req, update_span_on_error, update_span_on_success};
 use http::{Request, Response};
 use opentelemetry::propagation::Extractor;
+use opentelemetry_http::HeaderExtractor;
 use pin_project::pin_project;
 use std::{
     error::Error,
@@ -14,7 +15,9 @@ use tower::{Layer, Service};
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-/// Layer to add OTEL instrumentation to your axum app
+/// Tower layer to add OTEL traces instrumentation to your axum app
+/// It extract informations from the incoming HTTP request to create a span according to the
+/// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/rpc/grpc/)
 #[derive(Default, Debug, Clone)]
 pub struct OtelLoggerLayer;
 
@@ -25,8 +28,6 @@ impl<S> Layer<S> for OtelLoggerLayer {
     }
 }
 
-/// This service extract informations from the incoming HTTP request to create a span according to the
-/// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-server)
 #[derive(Debug, Clone)]
 pub struct OtelLogger<S> {
     inner: S,
@@ -40,9 +41,9 @@ impl<S> OtelLogger<S> {
 
 impl<S, B, B2> Service<Request<B>> for OtelLogger<S>
 where
-    S: Service<Request<B>, Response = Response<B2>, Error = BoxError> + Clone + Send + 'static,
+    S: Service<Request<B>, Response = Response<B2>>,
+    S::Error: Into<BoxError>,
     S::Future: Send + 'static,
-    B: Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -52,26 +53,18 @@ where
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(Into::into)
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, req: Request<B>) -> Self::Future {
         let span = extract_otel_info_from_req(&req);
 
-        let extractor = HttpHeaderExtractorHeaderExtractor(req.headers());
         let context = opentelemetry::global::get_text_map_propagator(|propagator| {
-            propagator.extract(&extractor)
+            propagator.extract(&HeaderExtractor(req.headers()))
         });
         span.set_parent(context);
 
-        // Do we need to do this ?
-        // Or entering the span only in the poll function is OK ?
-        // let future = {
-        //     let _enter = span.enter();
-        //     self.inner.call(req)
-        // };
         ResponseFuture {
-            //inner: future,
             inner: self.inner.call(req),
             span,
         }
@@ -85,11 +78,12 @@ pub struct ResponseFuture<F> {
     pub span: Span,
 }
 
-impl<Fut, ResBody> Future for ResponseFuture<Fut>
+impl<F, B, E> Future for ResponseFuture<F>
 where
-    Fut: Future<Output = Result<Response<ResBody>, BoxError>>,
+    F: Future<Output = Result<Response<B>, E>>,
+    E: Into<BoxError>,
 {
-    type Output = Result<Response<ResBody>, BoxError>;
+    type Output = Result<Response<B>, E>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
@@ -100,7 +94,7 @@ where
             Poll::Ready(result) => result,
         };
 
-        match result {
+        match result.map_err(Into::into) {
             Ok(mut req) => {
                 if req.status().is_server_error() {
                     // let error = req
@@ -128,19 +122,4 @@ where
 pub struct OtelError {
     pub types: String,
     pub messages: String,
-}
-
-/// Set the parent trace if it is set in http headers, otherwise the span created is the root one
-struct HttpHeaderExtractorHeaderExtractor<'a>(pub &'a http::HeaderMap);
-
-impl<'a> Extractor for HttpHeaderExtractorHeaderExtractor<'a> {
-    /// Get a value for a key from the `HeaderMap`. If the value is not valid ASCII, returns None.
-    fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).and_then(|value| value.to_str().ok())
-    }
-
-    /// Collect all the keys from the `HeaderMap`.
-    fn keys(&self) -> Vec<&str> {
-        self.0.keys().map(http::HeaderName::as_str).collect()
-    }
 }

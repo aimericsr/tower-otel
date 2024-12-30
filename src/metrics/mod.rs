@@ -1,1 +1,2 @@
-pub mod service;
+pub mod grpc;
+pub mod http;
