@@ -1,4 +1,4 @@
-use http::{HeaderMap, HeaderValue, Request, Response, Uri, Version};
+use http::{HeaderMap, HeaderValue, Request, Response, Uri};
 use opentelemetry::{propagation::Injector, trace::Status};
 use tonic::transport::server::TcpConnectInfo;
 use tracing::{field::Empty, Span};

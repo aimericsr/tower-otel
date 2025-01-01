@@ -1,3 +1,7 @@
+use crate::metrics::{
+    compute_approximate_request_size, HTTP_REQ_DURATION_HISTOGRAM_BUCKETS,
+    HTTP_REQ_SIZE_HISTOGRAM_BUCKETS,
+};
 use axum::body::HttpBody;
 use axum::extract::MatchedPath;
 use http::{Request, Response};
@@ -5,7 +9,7 @@ use opentelemetry::{
     metrics::{Counter, Histogram, Meter, UpDownCounter},
     KeyValue,
 };
-use pin_project::pin_project;
+use pin_project_lite::pin_project;
 use std::{
     error::Error,
     fmt::Debug,
@@ -16,7 +20,7 @@ use std::{
 };
 use tower::{Layer, Service};
 
-/// Tower layer to add OTEL metrics instrumentation to your axum app
+/// Add OTEL metrics instrumentation to your axum app
 /// It extract informations from the incoming HTTP request to create metrics
 /// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-client)
 #[derive(Debug, Clone)]
@@ -38,6 +42,9 @@ impl<S> Layer<S> for OtelMetricsLayer {
     }
 }
 
+/// Add OTEL metrics instrumentation to your axum app
+/// It extract informations from the incoming HTTP request to create metrics
+/// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-client)
 #[derive(Debug, Clone)]
 pub struct OtelMetrics<S> {
     metric: Metric,
@@ -90,26 +97,6 @@ impl<S> OtelMetrics<S> {
         OtelMetrics { inner, metric }
     }
 }
-
-const HTTP_REQ_DURATION_HISTOGRAM_BUCKETS: &[f64] = &[
-    0.0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
-];
-
-const KB: f64 = 1024.0;
-const MB: f64 = 1024.0 * KB;
-
-const HTTP_REQ_SIZE_HISTOGRAM_BUCKETS: &[f64] = &[
-    1.0 * KB,   // 1 KB
-    2.0 * KB,   // 2 KB
-    5.0 * KB,   // 5 KB
-    10.0 * KB,  // 10 KB
-    100.0 * KB, // 100 KB
-    500.0 * KB, // 500 KB
-    1.0 * MB,   // 1 MB
-    2.5 * MB,   // 2 MB
-    5.0 * MB,   // 5 MB
-    10.0 * MB,  // 10 MB
-];
 
 /// The metrics we used in the middleware
 #[derive(Debug, Clone)]
@@ -184,36 +171,21 @@ where
     }
 }
 
-fn compute_approximate_request_size<T>(req: &Request<T>) -> usize {
-    let mut s = 0;
-    s += req.uri().path().len();
-    s += req.method().as_str().len();
-
-    req.headers().iter().for_each(|(k, v)| {
-        s += k.as_str().len();
-        s += v.as_bytes().len();
-    });
-
-    s += req.uri().host().map(|h| h.len()).unwrap_or(0);
-
-    s += req
-        .headers()
-        .get(http::header::CONTENT_LENGTH)
-        .map(|v| v.to_str().unwrap().parse::<usize>().unwrap_or(0))
-        .unwrap_or(0);
-    s
-}
-
-#[pin_project]
-pub struct ResponseFuture<F> {
-    #[pin]
-    inner: F,
-    metric: Metric,
-    start: Instant,
-    path: String,
-    method: String,
-    host: String,
-    req_size: u64,
+pin_project! {
+    /// [`OtelMetrics`] response future
+    ///
+    /// [`OtelMetrics`]: crate::metrics::reqwest::OtelMetrics
+    #[derive(Debug)]
+    pub struct ResponseFuture<F> {
+        #[pin]
+        inner: F,
+        metric: Metric,
+        start: Instant,
+        path: String,
+        method: String,
+        host: String,
+        req_size: u64,
+    }
 }
 
 impl<Fut, ResBody, E> Future for ResponseFuture<Fut>
