@@ -1,3 +1,5 @@
+use crate::{compute_approximate_response_body_size, compute_approximate_response_size};
+
 use super::{inject_trace_id, update_span_with_response_headers};
 use extractor::extract_otel_info_from_req;
 use http::{Request, Response};
@@ -105,6 +107,13 @@ where
             Ok(mut response) => {
                 update_span_with_response_headers(response.headers());
                 inject_trace_id(response.headers_mut());
+                let response_size = compute_approximate_response_size(&response);
+                let response_body_size = compute_approximate_response_body_size(&response);
+                this.span.record("http.response.size", response_size);
+                this.span
+                    .record("http.response.body.size", response_body_size);
+                this.span
+                    .record("http.response.status_code", response.status().as_str());
                 Poll::Ready(Ok(response))
             }
             Err(err) => {
@@ -116,11 +125,15 @@ where
 
 pub mod extractor {
     use axum::extract::MatchedPath;
-    use http::Request;
+    use http::{header::USER_AGENT, Request};
     use hyper_util::client::legacy::connect::HttpInfo;
     use opentelemetry::trace::Status;
     use tracing::{field::Empty, Span};
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    use crate::{
+        compute_approximate_request_body_size, compute_approximate_request_size,
+        traces::update_span_with_request_headers,
+    };
 
     pub fn extract_otel_info_from_req<B>(req: &Request<B>) -> Span {
         let route = req
@@ -132,28 +145,45 @@ pub mod extractor {
 
         let (local_addr, local_port, remote_addr, remote_port) =
             extract_client_server_conn_info(&req);
+        let span_name = format!("{method}/{route}");
+
+        let user_agent = req.headers().get(USER_AGENT).map(|v| v.to_str().unwrap());
+
+        let http_request_size = compute_approximate_request_size(req);
+        let http_request_body_size = compute_approximate_request_body_size(req);
+
+        let url_full = req.uri().to_string();
+        let http_version = req.version();
 
         let span = tracing::span!(tracing::Level::INFO, "OTEL HTTP",
-            // network.peer.address = server_adress,
-            // network.peer.port = server_port,
+            network.peer.address = remote_addr,
+            network.peer.port = remote_port,
+            network.protocol.version = ?http_version,
             network.transport = "tcp",
-            "network.type" = "ipv4",
             server.address = local_addr,
             server.port = local_port,
-            client.address =  remote_addr,
-            client.port = remote_port,
-            otel.name = format!("{method}/{route}"),
+            http.request.method = method,
+            http.request.method_original = method,
+            http.request.resend_count = 0,
+            // http.request.header.random_key = Empty,
+            http.request.size = http_request_size,
+            http.request.body.size = http_request_body_size,
+            url.full = url_full,
+            url.shchema = "http",
+            url.template = Empty,
+            user_agent.original = user_agent,
+            user_agent.synthetic.type = user_agent,
+            // http.response.header.random_key = Empty,
+            http.response.size = Empty,
+            http.response.body.size = Empty,
+            http.response.status_code = Empty,
+            error.type = Empty,
+            otel.name = span_name,
             otel.kind = ?opentelemetry::trace::SpanKind::Server,
-            otel.status_code = ?Status::default(),
+            otel.status_code = ?Status::Unset,
             otel.status_message = Empty,
         );
-
-        for (header_name, header_value) in req.headers().iter() {
-            if let Ok(attribute_value) = header_value.to_str() {
-                let attribute_name = format!("http.request.header.{}", header_name);
-                span.set_attribute(attribute_name, attribute_value.to_owned());
-            }
-        }
+        update_span_with_request_headers(req.headers());
 
         span
     }

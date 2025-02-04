@@ -1,3 +1,5 @@
+use crate::{compute_approximate_response_body_size, compute_approximate_response_size};
+
 use super::{inject_trace_id, update_span_with_response_headers};
 use extract::extract_otel_info_from_req;
 use http::{Request, Response};
@@ -104,8 +106,11 @@ where
             Ok(mut response) => {
                 update_span_with_response_headers(response.headers());
                 inject_trace_id(response.headers_mut());
-                this.span.record("http.response.size", 0);
-                this.span.record("http.response.body.size", 0);
+                let response_size = compute_approximate_response_size(&response);
+                let response_body_size = compute_approximate_response_body_size(&response);
+                this.span.record("http.response.size", response_size);
+                this.span
+                    .record("http.response.body.size", response_body_size);
                 this.span
                     .record("http.response.status_code", response.status().as_str());
 
