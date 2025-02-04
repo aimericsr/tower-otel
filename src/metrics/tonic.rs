@@ -1,6 +1,6 @@
-use crate::metrics::{
-    compute_approximate_request_size, HTTP_REQ_DURATION_HISTOGRAM_BUCKETS,
-    HTTP_REQ_SIZE_HISTOGRAM_BUCKETS,
+use crate::{
+    compute_approximate_request_size,
+    metrics::{HTTP_REQ_DURATION_HISTOGRAM_BUCKETS, HTTP_REQ_SIZE_HISTOGRAM_BUCKETS},
 };
 use axum::body::HttpBody;
 use axum::extract::MatchedPath;

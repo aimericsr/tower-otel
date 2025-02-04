@@ -1,11 +1,15 @@
 pub mod axum;
-pub(crate) mod extractors;
+pub mod reqwest;
 pub mod tonic;
 
+use http::HeaderMap;
 use opentelemetry::trace::TraceContextExt;
+use opentelemetry_http::HeaderInjector;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-/// Extract the current OTEL trace id. This can be used to report the trace id to clients
+/// Extract the current OTEL trace id
+///
+/// This can be used to report the trace id to clients
 /// to better trace further problems for specifics requests encounterd by your API consumers
 pub fn get_current_otel_trace_id() -> Option<String> {
     let context = tracing::Span::current().context();
@@ -16,20 +20,46 @@ pub fn get_current_otel_trace_id() -> Option<String> {
         .then(|| span_context.trace_id().to_string())
 }
 
-// /// Record the provided Error as an event with the Opentelemetry conventions
-// pub fn record_exeption_as_event(error: &dyn Error) {
-//     error!(
-//         exception.escaped = false,
-//         "exception.type" = error.to_string(),
-//         exception.message = error.to_string(),
-//         exception.stacktrace = error.source(),
-//     );
-// }
+/// Inject OTEL information into the response
+///
+/// Can be use to propagat OTEL trace id between distributed services
+pub(crate) fn inject_trace_id(headers: &mut http::HeaderMap) {
+    let context = tracing::Span::current().context();
 
-// /// Record the provided Error inside the span with the Opentelemetry conventions
-// pub fn record_exeption_for_span(span: &Span, error: &dyn Error) {
-//     span.record("exception.escaped", false);
-//     span.record("exception.type", error.to_string());
-//     span.record("exception.message", error.to_string());
-//     span.record("exception.stacktrace", error.source());
-// }
+    let mut injector = HeaderInjector(headers);
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&context, &mut injector);
+    });
+}
+
+/// Update span with response headers
+///
+/// But it use tracing_opentelemetry::span_ext::Span::set_attribute
+/// so that we can set attribute that were not here at the span creation
+/// it is bypassing tracing API and will not show in logs other that OTEL
+pub(crate) fn update_span_with_request_headers(headers: &HeaderMap) {
+    let span = tracing::Span::current();
+
+    for (header_name, header_value) in headers.iter() {
+        if let Ok(attribute_value) = header_value.to_str() {
+            let attribute_name = format!("http.request.header.{}", header_name);
+            span.set_attribute(attribute_name, attribute_value.to_owned());
+        }
+    }
+}
+
+/// Update span with response headers
+///
+/// But it use tracing_opentelemetry::span_ext::Span::set_attribute
+/// so that we can set attribute that were not here at the span creation
+/// it is bypassing tracing API and will not show in logs other that OTEL
+pub(crate) fn update_span_with_response_headers(headers: &HeaderMap) {
+    let span = tracing::Span::current();
+
+    for (header_name, header_value) in headers.iter() {
+        if let Ok(attribute_value) = header_value.to_str() {
+            let attribute_name = format!("http.response.header.{}", header_name);
+            span.set_attribute(attribute_name, attribute_value.to_owned());
+        }
+    }
+}
