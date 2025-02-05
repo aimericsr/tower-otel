@@ -1,44 +1,122 @@
-use crate::{compute_approximate_response_body_size, compute_approximate_response_size};
-
 use super::{inject_trace_id, update_span_with_response_headers};
+use crate::{compute_approximate_response_body_size, compute_approximate_response_size};
+use core::fmt;
 use extract::extract_otel_info_from_req;
-use http::{Request, Response};
+use http::{request::Parts, Request, Response};
 use opentelemetry_http::HeaderExtractor;
 use pin_project_lite::pin_project;
 use std::{
     fmt::Debug,
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{ready, Context, Poll},
 };
 use tower::{BoxError, Layer, Service};
-use tracing::Span;
+use tracing::{Span, Value};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-/// Add OTEL traces instrumentation to your axum app
+pub type SpanAttributes = Arc<dyn Fn(&Parts) -> Vec<(&'static str, Box<dyn Value>)> + Send + Sync>;
+pub type Filter = Arc<dyn Fn(&Parts) -> bool + Send + Sync>;
+
+/// Add OTEL traces instrumentation to your axum app.
 /// It extract informations from the incoming HTTP request to create a span according to the
 /// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-server)
-#[derive(Default, Debug, Clone)]
-pub struct OtelLoggerLayer;
+///
+/// Fields populated by default:
+///
+/// - network.protocol.name
+/// - network.protocol.version
+/// - network.transport
+/// - server.address
+/// - server.port
+/// - client.address
+/// - client.port
+/// - http.request.method
+/// - http.route
+/// - url.schema
+/// - url.path
+/// - url.query
+/// - user_agent.original
+/// - http.response.status_code
+/// - error.type
+#[derive(Clone)]
+pub struct OtelLoggerLayer {
+    span_attributes: SpanAttributes,
+    is_recorded: Filter,
+}
+
+impl OtelLoggerLayer {
+    pub fn with_filter(self, is_recorded: Filter) -> Self {
+        OtelLoggerLayer {
+            span_attributes: self.span_attributes,
+            is_recorded,
+        }
+    }
+
+    pub fn with_span_attributes(self, span_attributes: SpanAttributes) -> Self {
+        OtelLoggerLayer {
+            span_attributes,
+            is_recorded: self.is_recorded,
+        }
+    }
+}
+
+impl Default for OtelLoggerLayer {
+    fn default() -> Self {
+        Self {
+            span_attributes: Arc::new(|_req: &Parts| Vec::new()),
+            is_recorded: Arc::new(|_req: &Parts| true),
+        }
+    }
+}
+
+impl fmt::Debug for OtelLoggerLayer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtelLoggerLayer")
+            .field("span_attributes", &"<closure>")
+            .field("is_recorded", &"<closure>")
+            .finish()
+    }
+}
 
 impl<S> Layer<S> for OtelLoggerLayer {
     type Service = OtelLogger<S>;
     fn layer(&self, inner: S) -> Self::Service {
-        OtelLogger { inner }
+        OtelLogger {
+            inner,
+            span_attributes: self.span_attributes.clone(),
+            is_recorded: self.is_recorded.clone(),
+        }
     }
 }
 
-/// Add OTEL traces instrumentation to your axum app
+/// Add OTEL traces instrumentation to your axum app.
 /// It extract informations from the incoming HTTP request to create a span according to the
 /// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-server)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OtelLogger<S> {
     inner: S,
+    span_attributes: SpanAttributes,
+    is_recorded: Filter,
+}
+
+impl<S> fmt::Debug for OtelLogger<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtelLoggerLayer")
+            .field("span_attributes", &"<closure>")
+            .field("is_recorded", &"<closure>")
+            .finish()
+    }
 }
 
 impl<S> OtelLogger<S> {
-    pub fn new(inner: S) -> Self {
-        OtelLogger { inner }
+    pub fn new(inner: S, span_attributes: SpanAttributes, is_recorded: Filter) -> Self {
+        OtelLogger {
+            inner,
+            span_attributes,
+            is_recorded,
+        }
     }
 }
 
@@ -60,7 +138,18 @@ where
     }
 
     fn call(&mut self, request: Request<B>) -> Self::Future {
-        let span = extract_otel_info_from_req(&request);
+        let (parts, body) = request.into_parts();
+        let cloned_parts = parts.clone();
+        let request = http::Request::from_parts(parts, body);
+
+        let span = match (self.is_recorded)(&cloned_parts) {
+            true => {
+                let extra_attributes = (self.span_attributes)(&cloned_parts);
+                let span = extract_otel_info_from_req(&request, extra_attributes);
+                span
+            }
+            false => tracing::Span::none(),
+        };
 
         let context = opentelemetry::global::get_text_map_propagator(|propagator| {
             propagator.extract(&HeaderExtractor(request.headers()))
@@ -106,13 +195,17 @@ where
             Ok(mut response) => {
                 update_span_with_response_headers(response.headers());
                 inject_trace_id(response.headers_mut());
-                let response_size = compute_approximate_response_size(&response);
-                let response_body_size = compute_approximate_response_body_size(&response);
-                this.span.record("http.response.size", response_size);
-                this.span
-                    .record("http.response.body.size", response_body_size);
+                // let response_size = compute_approximate_response_size(&response);
+                // let response_body_size = compute_approximate_response_body_size(&response);
+                // this.span.record("http.response.size", response_size);
+                // this.span
+                //     .record("http.response.body.size", response_body_size);
                 this.span
                     .record("http.response.status_code", response.status().as_str());
+                // TO DO : How to get root error with more context ?
+                if response.status().is_server_error() {
+                    this.span.record("error.type", response.status().as_str());
+                }
 
                 Poll::Ready(Ok(response))
             }
@@ -124,18 +217,20 @@ where
 }
 
 mod extract {
-    use axum::extract::{ConnectInfo, MatchedPath, OriginalUri};
-    use http::{header::USER_AGENT, Request};
-    use opentelemetry::trace::Status;
-    use std::net::SocketAddr;
-    use tracing::{field::Empty, Span};
-
     use crate::{
         compute_approximate_request_body_size, compute_approximate_request_size,
         traces::update_span_with_request_headers,
     };
+    use axum::extract::{ConnectInfo, MatchedPath, OriginalUri};
+    use http::{header::USER_AGENT, Request};
+    use opentelemetry::trace::Status;
+    use std::net::SocketAddr;
+    use tracing::{field::Empty, Span, Value};
 
-    pub fn extract_otel_info_from_req<B>(req: &Request<B>) -> Span {
+    pub fn extract_otel_info_from_req<B>(
+        req: &Request<B>,
+        _extra_attributes: Vec<(&str, Box<dyn Value>)>,
+    ) -> Span {
         let route = req
             .extensions()
             .get::<MatchedPath>()
@@ -144,45 +239,45 @@ mod extract {
 
         let path = req.extensions().get::<OriginalUri>().unwrap().path();
         let query = req.extensions().get::<OriginalUri>().unwrap().query();
-        let http_version = req.version();
+        let http_version = format!("{:?}", req.version()).replace("HTTP/", "");
 
         let (local_addr, local_port, remote_addr, remote_port) =
             extract_client_server_conn_info(&req);
         let span_name = format!("{method} {route}");
         let user_agent = req.headers().get(USER_AGENT).map(|v| v.to_str().unwrap());
 
-        let http_request_size = compute_approximate_request_size(req);
-        let http_request_body_size = compute_approximate_request_body_size(req);
+        // let http_request_size = compute_approximate_request_size(req);
+        // let http_request_body_size = compute_approximate_request_body_size(req);
 
         let span = tracing::span!(tracing::Level::INFO, "OTEL HTTP",
-            network.peer.address = remote_addr,
-            network.peer.port = remote_port,
-            network.local.address = local_addr,
-            network.local.port = local_port,
+            // network.peer.address = remote_addr,
+            // network.peer.port = remote_port,
+            // network.local.address = local_addr,
+            // network.local.port = local_port,
             network.protocol.name = "http",
             network.protocol.version = ?http_version,
             network.transport = "tcp",
-            network.type = "ipv4",
             server.address = local_addr,
             server.port = local_port,
             client.address = remote_addr,
             client.port = remote_port,
             http.request.method = method,
-            http.request.method_original = method,
+            // http.request.method_original = method,
             // http.request.header.random_key = Empty,
-            http.request.size = http_request_size,
-            http.request.body.size = http_request_body_size,
+            // http.request.size = http_request_size, // Experimental
+            // http.request.body.size = http_request_body_size, // Experimental
             http.route = route,
             url.shchema = "http",
             url.path = path,
             url.query = query,
             user_agent.original = user_agent,
-            user_agent.synthetic.type = user_agent,
+            //user_agent.synthetic.type = user_agent, // Experimental
             // http.response.header.random_key = Empty,
-            http.response.size = Empty,
-            http.response.body.size = Empty,
+            // http.response.size = Empty, // Experimental
+            // http.response.body.size = Empty, // Experimental
             http.response.status_code = Empty,
             error.type = Empty,
+            // Special Fields use by tracing-opentelemetry
             otel.name = span_name,
             otel.kind = ?opentelemetry::trace::SpanKind::Server,
             otel.status_code = ?Status::Unset,
@@ -262,13 +357,26 @@ mod tests {
     async fn test_with_span_id() {
         let (exporter, _guard) = init_test_tracer();
 
+        // TO DO : hide Arc impl details into the new methods ?
+        // As Fn is a trait, we can't simply pass a Fn but hide it behind some kind of pointer (&, Box, Arc ...)
+        // So is it possible to simplify the signature ? Can't use & as we have lifetime issue and the value is moved
+        // into the arc, Box is possible but is the same is using an Arc for the caller
+        let logger = OtelLoggerLayer::default()
+            .with_filter(Arc::new(|_req: &Parts| true))
+            .with_span_attributes(Arc::new(|_req: &Parts| {
+                let mut vec: Vec<(&'static str, Box<dyn Value>)> = Vec::new();
+                vec.push(("my_value", Box::new("here")));
+                vec.push(("my.value2", Box::new("here")));
+                vec
+            }));
+
         let routes = Router::new()
             .route("/test_ok", get(|| async { StatusCode::OK.into_response() }))
             .route(
                 "/test_err",
                 get(|| async { StatusCode::INTERNAL_SERVER_ERROR.into_response() }),
             )
-            .layer(OtelLoggerLayer);
+            .layer(logger);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = axum::serve(
@@ -327,13 +435,13 @@ mod tests {
         assert_eq!(span.span_kind, SpanKind::Server);
         assert_eq!(span.status, Status::Unset);
 
-        // dbg!(&span.attributes.len());
+        dbg!(&span.attributes.len());
         // for key_value in &span.attributes {
         //     let key = &key_value.key;
         //     let value = &key_value.value;
-        //     if key.as_str() == "network.peer.port" {
-        //         dbg!(value);
-        //     }
+        //     //if key.as_str() == "my_value" {
+        //     dbg!(value);
+        //     //}
         // }
     }
 
@@ -347,7 +455,7 @@ mod tests {
                 "/test_err",
                 get(|| async { StatusCode::INTERNAL_SERVER_ERROR.into_response() }),
             )
-            .layer(OtelLoggerLayer);
+            .layer(OtelLoggerLayer::default());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = axum::serve(
