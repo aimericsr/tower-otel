@@ -8,16 +8,16 @@ tower = "0.5"
 http = "1"
 http-body = "1"
 tracing = "0.1"
-tracing-opentelemetry = "0.28.0"
-opentelemetry = { version = "0.27", features = ["metrics", "trace"] }
-opentelemetry_sdk = { version = "0.27", features = ["metrics", "rt-tokio", "logs", "trace", "testing"] }
-opentelemetry-semantic-conventions = { version = "0.27" }
-opentelemetry-http = "0.27"
+opentelemetry = { version = "0.28", features = ["metrics", "trace"] }
+opentelemetry_sdk = { version = "0.28", features = ["metrics", "rt-tokio", "logs", "trace", "testing"] }
+opentelemetry-http = "0.28"
+opentelemetry-semantic-conventions = { version = "0.28" }
+tracing-opentelemetry = "0.29"
 pin-project-lite = "0.2"
 tonic = "0.12"
 axum = "0.8"
 reqwest = "0.12"
-hyper-util = { version = "0.1.10", features = ["client"] }
+hyper-util = { version = "0.1", features = ["client"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }

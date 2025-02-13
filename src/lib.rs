@@ -1,62 +1,42 @@
-pub mod metrics;
-pub mod traces;
+//! # OTEL Tracing for Rust Web Services
+//!
+//! This crate provides OpenTelemetry (OTEL) instrumentation for common Rust web services,
+//! enabling the generation of metrics and traces using the Rust OpenTelemetry SDK.
+//!
+//! ## Overview
+//! The following Rust crates are supported with OpenTelemetry instrumentation:
+//!
+//! | Crate     | Role             | Signals Supported  |
+//! |----------|----------------|-------------------|
+//! | [axum](https://docs.rs/axum/latest/axum/)   | Server          | Traces / Metrics  |
+//! | [tonic](https://docs.rs/tonic/latest/tonic/)  | Server & Client | Traces / Metrics  |
+//! | [tonic](https://docs.rs/reqwest/latest/reqwest/)| Client          | Traces / Metrics  |
+//! | [tonic](https://docs.rs/tokio/latest/tokio/)  | Runtime         | Metrics          |
+//!
+//! ## Implementation Details
+//! This project integrates with the `tracing` ecosystem, which is the primary
+//! tracing library in Rust. Instead of directly interfacing with the OpenTelemetry SDK,
+//! traces are exported using `tracing-opentelemetry`, ensuring seamless interoperability
+//! with existing Rust projects using `tracing`.
+//!
+//! ## Inspiration
+//! This project follows a similar approach to the OpenTelemetry Go instrumentation for common services:
+//! [opentelemetry-go-contrib](https://github.com/open-telemetry/opentelemetry-go-contrib/tree/main/instrumentation).
 
-pub(crate) fn compute_approximate_request_size<T>(req: &http::Request<T>) -> usize {
-    let mut s = 0;
-    s += req.uri().path().len();
-    s += req.method().as_str().len();
+pub mod axum;
+mod helper;
+pub mod reqwest;
+pub mod tonic;
 
-    req.headers().iter().for_each(|(k, v)| {
-        s += k.as_str().len();
-        s += v.as_bytes().len();
-    });
-
-    s += req.uri().host().map(|h| h.len()).unwrap_or(0);
-
-    s += req
-        .headers()
-        .get(http::header::CONTENT_LENGTH)
-        .map(|v| v.to_str().unwrap().parse::<usize>().unwrap_or(0))
-        .unwrap_or(0);
-    s
-}
-pub(crate) fn compute_approximate_request_body_size<T>(req: &http::Request<T>) -> usize {
-    let mut s = 0;
-
-    s += req
-        .headers()
-        .get(http::header::CONTENT_LENGTH)
-        .map(|v| v.to_str().unwrap().parse::<usize>().unwrap_or(0))
-        .unwrap_or(0);
-    s
-}
-
-pub(crate) fn compute_approximate_response_size<T>(req: &http::Response<T>) -> usize {
-    let mut s = 0;
-    // s += req.uri().path().len();
-    // s += req.method().as_str().len();
-
-    req.headers().iter().for_each(|(k, v)| {
-        s += k.as_str().len();
-        s += v.as_bytes().len();
-    });
-
-    //s += req.uri().host().map(|h| h.len()).unwrap_or(0);
-
-    s += req
-        .headers()
-        .get(http::header::CONTENT_LENGTH)
-        .map(|v| v.to_str().unwrap().parse::<usize>().unwrap_or(0))
-        .unwrap_or(0);
-    s
-}
-pub(crate) fn compute_approximate_response_body_size<T>(req: &http::Response<T>) -> usize {
-    let mut s = 0;
-
-    s += req
-        .headers()
-        .get(http::header::CONTENT_LENGTH)
-        .map(|v| v.to_str().unwrap().parse::<usize>().unwrap_or(0))
-        .unwrap_or(0);
-    s
+use opentelemetry::trace::TraceContextExt;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+/// Extract the current OTEL trace id. This can be used to report the trace id to clients
+/// to better trace further problems for specifics requests encounterd by your API consumers
+pub fn get_current_otel_trace_id() -> Option<String> {
+    let context = tracing::Span::current().context();
+    let span = context.span();
+    let span_context = span.span_context();
+    span_context
+        .is_valid()
+        .then(|| span_context.trace_id().to_string())
 }

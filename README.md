@@ -1,10 +1,18 @@
-# OTEL tracing for Rust Web Services
+# OTEL Tracing for Rust Web Services
 
-Generates metrics and traces using rust opentelmetry sdk. 
+This project provides OpenTelemetry (OTEL) instrumentation for common Rust web services, enabling the generation of metrics and traces using the Rust OpenTelemetry SDK.
 
-The goal is to provide client(reqwest, tonic) and servers(axum, tonic) implementations.
+## Overview
+| Crate | Role | Signals Supported |
+|-----------|-------|-------------------|
+| `axum`   | Server | Traces / Metrics |
+| `tonic`  | Server & Client | Traces / Metrics |
+| `reqwest` | Client | Traces / Metrics |
+| `tokio`  | Runtime | Metrics |
 
+## Implementation Details
+As `tracing` is the primary tracing library in Rust, this project uses `tracing-opentelemetry` instead of directly interfacing with the OpenTelemetry SDK for traces signals.
 
-https://opentelemetry.io/docs/specs/semconv/http/http-spans/#http-server
+## Inspiration
+This project follows a similar approach to the OpenTelemetry Go instrumentation for common services: [opentelemetry-go-contrib](https://github.com/open-telemetry/opentelemetry-go-contrib/tree/main/instrumentation).
 
-https://opentelemetry.io/docs/specs/semconv/rpc/rpc-spans/#server-attributes

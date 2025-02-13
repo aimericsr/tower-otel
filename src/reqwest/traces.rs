@@ -1,6 +1,7 @@
-use crate::{compute_approximate_response_body_size, compute_approximate_response_size};
-
-use super::{inject_trace_id, update_span_with_response_headers};
+use crate::helper::{
+    compute_approximate_response_body_size, compute_approximate_response_size, inject_trace_id,
+    update_span_with_response_headers,
+};
 use extractor::extract_otel_info_from_req;
 use http::{Request, Response};
 use hyper_util::client::legacy::connect::HttpInfo;
@@ -105,7 +106,7 @@ where
 
         match response.map_err(Into::into) {
             Ok(mut response) => {
-                update_span_with_response_headers(response.headers());
+                update_span_with_response_headers(response.headers(), &this.span);
                 inject_trace_id(response.headers_mut());
                 let response_size = compute_approximate_response_size(&response);
                 let response_body_size = compute_approximate_response_body_size(&response);
@@ -130,9 +131,9 @@ pub mod extractor {
     use opentelemetry::trace::Status;
     use tracing::{field::Empty, Span};
 
-    use crate::{
+    use crate::helper::{
         compute_approximate_request_body_size, compute_approximate_request_size,
-        traces::update_span_with_request_headers,
+        update_span_with_request_headers,
     };
 
     pub fn extract_otel_info_from_req<B>(req: &Request<B>) -> Span {
@@ -183,7 +184,7 @@ pub mod extractor {
             otel.status_code = ?Status::Unset,
             otel.status_message = Empty,
         );
-        update_span_with_request_headers(req.headers());
+        update_span_with_request_headers(req.headers(), &span);
 
         span
     }

@@ -1,12 +1,12 @@
-use crate::{
-    compute_approximate_request_size,
-    metrics::{HTTP_REQ_DURATION_HISTOGRAM_BUCKETS, HTTP_REQ_SIZE_HISTOGRAM_BUCKETS},
+use crate::helper::{
+    compute_approximate_request_size, HTTP_REQ_DURATION_HISTOGRAM_BUCKETS,
+    HTTP_REQ_SIZE_HISTOGRAM_BUCKETS,
 };
 use axum::body::HttpBody;
 use axum::extract::MatchedPath;
 use http::{Request, Response};
 use opentelemetry::{
-    metrics::{Counter, Histogram, Meter, UpDownCounter},
+    metrics::{Histogram, Meter, UpDownCounter},
     KeyValue,
 };
 use pin_project_lite::pin_project;
@@ -19,9 +19,17 @@ use std::{
 };
 use tower::{BoxError, Layer, Service};
 
-/// Add OTEL metrics instrumentation to your axum app
+/// Add OTEL metrics instrumentation to your axum app via the supplied inner service.
+///
 /// It extract informations from the incoming HTTP request to create metrics
 /// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-server)
+///
+///  Metrics created by default:
+///
+/// - http.server.request.duration
+/// - http.server.active_requests
+/// - http.server.request.body.size
+/// - http.server.response.body.size
 #[derive(Debug, Clone)]
 pub struct OtelMetricsLayer {
     meter: Meter,
@@ -42,8 +50,6 @@ impl<S> Layer<S> for OtelMetricsLayer {
 }
 
 /// Add OTEL metrics instrumentation to your axum app
-/// It extract informations from the incoming HTTP request to create metrics
-/// [OTEL specification](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#http-server)
 #[derive(Debug, Clone)]
 pub struct OtelMetrics<S> {
     metric: Metric,
@@ -78,19 +84,11 @@ impl<S> OtelMetrics<S> {
             .with_boundaries(HTTP_REQ_SIZE_HISTOGRAM_BUCKETS.to_vec())
             .build();
 
-        let requests_total = meter
-            .u64_counter("requests")
-            .with_description(
-                "How many HTTP requests processed, partitioned by status code and HTTP method.",
-            )
-            .build();
-
         let metric = Metric {
             req_duration,
             req_active,
             req_size,
             res_size,
-            requests_total,
         };
 
         OtelMetrics { inner, metric }
@@ -99,8 +97,7 @@ impl<S> OtelMetrics<S> {
 
 /// The metrics we used in the middleware
 #[derive(Debug, Clone)]
-pub struct Metric {
-    // Otel spec
+struct Metric {
     pub req_duration: Histogram<f64>,
 
     pub req_active: UpDownCounter<i64>,
@@ -108,9 +105,6 @@ pub struct Metric {
     pub req_size: Histogram<u64>,
 
     pub res_size: Histogram<u64>,
-
-    // Custom spec
-    pub requests_total: Counter<u64>,
 }
 
 impl<S, B, B2> Service<Request<B>> for OtelMetrics<S>
@@ -226,8 +220,6 @@ where
         this.metric.req_size.record(*this.req_size, &labels);
 
         this.metric.res_size.record(res_size, &labels);
-
-        this.metric.requests_total.add(1, &labels);
 
         Poll::Ready(Ok(response))
     }

@@ -1,4 +1,4 @@
-use super::{inject_trace_id, update_span_with_response_headers};
+use crate::helper::{inject_trace_id, update_span_with_response_headers};
 use extractor::extract_otel_info_from_req;
 use http::{Request, Response};
 use opentelemetry_http::HeaderExtractor;
@@ -100,7 +100,7 @@ where
 
         match response.map_err(Into::into) {
             Ok(mut response) => {
-                update_span_with_response_headers(response.headers());
+                update_span_with_response_headers(response.headers(), &this.span);
                 inject_trace_id(response.headers_mut());
                 Poll::Ready(Ok(response))
             }
@@ -131,7 +131,7 @@ pub mod extractor {
                 let span = tracing::span!(tracing::Level::INFO, "OTEL GRPC",
                     // network.peer.address = server_adress,
                     // network.peer.port = server_port,
-                    network.transport = "tcp",
+                    // network.transport = "tcp",
                     "network.type" = "ipv4",
                     rpc.system = "grpc",
                     server.address = local_addr,

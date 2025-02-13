@@ -1,5 +1,6 @@
-use super::{inject_trace_id, update_span_with_response_headers};
-use crate::{compute_approximate_response_body_size, compute_approximate_response_size};
+use crate::helper::{
+    inject_trace_id, update_span_with_custom_attributes, update_span_with_response_headers,
+};
 use core::fmt;
 use extract::extract_otel_info_from_req;
 use http::{request::Parts, Request, Response};
@@ -13,10 +14,10 @@ use std::{
     task::{ready, Context, Poll},
 };
 use tower::{BoxError, Layer, Service};
-use tracing::{Span, Value};
+use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-pub type SpanAttributes = Arc<dyn Fn(&Parts) -> Vec<(&'static str, Box<dyn Value>)> + Send + Sync>;
+pub type SpanAttributes = Arc<dyn Fn(&Parts) -> Vec<(&'static str, &'static str)> + Send + Sync>;
 pub type Filter = Arc<dyn Fn(&Parts) -> bool + Send + Sync>;
 
 /// Add OTEL traces instrumentation to your axum app.
@@ -47,6 +48,7 @@ pub struct OtelLoggerLayer {
 }
 
 impl OtelLoggerLayer {
+    /// Choose to record or not the incoming HTTP request based on his [`http::request::Parts`].
     pub fn with_filter(self, is_recorded: Filter) -> Self {
         OtelLoggerLayer {
             span_attributes: self.span_attributes,
@@ -54,6 +56,14 @@ impl OtelLoggerLayer {
         }
     }
 
+    /// Choose to record additional fields in the root span
+    /// for the incoming HTTP request based on his [`http::request::Parts`].
+    ///
+    /// <div class="warning"> The current Tracing API does not allow to record fields after the span creation.
+    ///
+    /// To avoid this problem, fields provided into this function are recorded using
+    /// [`tracing_opentelemetry::OpenTelemetrySpanExt::set_attribute`]
+    /// Then, this fields will only be available for the [`tracing_opentelemetry`] layer and not other layers from the tracing. </div>
     pub fn with_span_attributes(self, span_attributes: SpanAttributes) -> Self {
         OtelLoggerLayer {
             span_attributes,
@@ -144,8 +154,9 @@ where
 
         let span = match (self.is_recorded)(&cloned_parts) {
             true => {
+                let span = extract_otel_info_from_req(&request);
                 let extra_attributes = (self.span_attributes)(&cloned_parts);
-                let span = extract_otel_info_from_req(&request, extra_attributes);
+                update_span_with_custom_attributes(extra_attributes, &span);
                 span
             }
             false => tracing::Span::none(),
@@ -193,7 +204,7 @@ where
 
         match response.map_err(Into::into) {
             Ok(mut response) => {
-                update_span_with_response_headers(response.headers());
+                update_span_with_response_headers(response.headers(), &this.span);
                 inject_trace_id(response.headers_mut());
                 // let response_size = compute_approximate_response_size(&response);
                 // let response_body_size = compute_approximate_response_body_size(&response);
@@ -217,33 +228,30 @@ where
 }
 
 mod extract {
-    use crate::{
-        compute_approximate_request_body_size, compute_approximate_request_size,
-        traces::update_span_with_request_headers,
-    };
+    use crate::helper::update_span_with_request_headers;
     use axum::extract::{ConnectInfo, MatchedPath, OriginalUri};
     use http::{header::USER_AGENT, Request};
     use opentelemetry::trace::Status;
-    use std::net::SocketAddr;
-    use tracing::{field::Empty, Span, Value};
+    use std::net::{SocketAddr, ToSocketAddrs};
+    use tracing::{field::Empty, Span};
 
-    pub fn extract_otel_info_from_req<B>(
-        req: &Request<B>,
-        _extra_attributes: Vec<(&str, Box<dyn Value>)>,
-    ) -> Span {
-        let route = req
-            .extensions()
-            .get::<MatchedPath>()
-            .map_or_else(|| "", |mp| mp.as_str());
-        let method = req.method().as_str();
-
+    pub fn extract_otel_info_from_req<B>(req: &Request<B>) -> Span {
         let path = req.extensions().get::<OriginalUri>().unwrap().path();
         let query = req.extensions().get::<OriginalUri>().unwrap().query();
         let http_version = format!("{:?}", req.version()).replace("HTTP/", "");
 
-        let (local_addr, local_port, remote_addr, remote_port) =
-            extract_client_server_conn_info(&req);
+        // If not matched path have been found, default to the path
+        let route = req
+            .extensions()
+            .get::<MatchedPath>()
+            .map_or_else(|| path, |mp| mp.as_str());
+
+        let method = req.method().as_str();
         let span_name = format!("{method} {route}");
+
+        let (client_addr, client_port) = extract_client_conn_info(&req);
+        let (server_addr, server_port) = extract_server_conn_info(&req);
+
         let user_agent = req.headers().get(USER_AGENT).map(|v| v.to_str().unwrap());
 
         // let http_request_size = compute_approximate_request_size(req);
@@ -257,10 +265,10 @@ mod extract {
             network.protocol.name = "http",
             network.protocol.version = ?http_version,
             network.transport = "tcp",
-            server.address = local_addr,
-            server.port = local_port,
-            client.address = remote_addr,
-            client.port = remote_port,
+            server.address = server_addr,
+            server.port = server_port,
+            client.address = client_addr,
+            client.port = client_port,
             http.request.method = method,
             // http.request.method_original = method,
             // http.request.header.random_key = Empty,
@@ -283,41 +291,83 @@ mod extract {
             otel.status_code = ?Status::Unset,
             otel.status_message = Empty,
         );
-        update_span_with_request_headers(req.headers());
+        update_span_with_request_headers(req.headers(), &span);
 
         span
     }
 
-    fn extract_client_server_conn_info<B>(
-        req: &Request<B>,
-    ) -> (Option<String>, Option<u16>, Option<String>, Option<u16>) {
-        // let local_addr = req
-        //     .extensions()
-        //     .get::<SocketAddr>()
-        //     .and_then(|info| info.local_addr)
-        //     .map(|addr| addr.ip().to_string());
-
-        // let local_port = req
-        //     .extensions()
-        //     .get::<ConnectInfo>()
-        //     .and_then(|info| info.local_addr)
-        //     .map(|addr| addr.port());
-
-        let local_addr = Some("unknown".to_string());
-
-        let local_port = Some(0000);
-
-        let remote_addr = req
+    fn extract_client_conn_info<B>(req: &Request<B>) -> (Option<String>, Option<u16>) {
+        let client_addr = req
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
             .map(|info| info.ip().to_string());
 
-        let remote_port = req
+        let client_port = req
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
             .map(|info| info.port());
 
-        (local_addr, local_port, remote_addr, remote_port)
+        (client_addr, client_port)
+    }
+
+    /// Follow OTLP [docs](https://opentelemetry.io/docs/specs/semconv/http/http-spans/#setting-serveraddress-and-serverport-attributes)
+    /// for trying to find the most intersting informations based on HTTP headers
+    fn extract_server_conn_info<B>(req: &Request<B>) -> (Option<String>, Option<u16>) {
+        let headers = req.headers();
+
+        if let Some(forwarded) = headers.get("forwarded") {
+            if let Some(result) = parse_forwarded_header(forwarded) {
+                return result;
+            }
+        }
+
+        if let Some(x_forwarded_host) = headers.get("x-forwarded-host") {
+            if let Some(result) = parse_host_header(x_forwarded_host) {
+                return result;
+            }
+        }
+
+        if let Some(authority) = headers.get(":authority") {
+            if let Some(result) = parse_host_header(authority) {
+                return result;
+            }
+        }
+
+        if let Some(host) = headers.get("host") {
+            if let Some(result) = parse_host_header(host) {
+                return result;
+            }
+        }
+
+        (None, None)
+    }
+
+    fn parse_forwarded_header(value: &http::HeaderValue) -> Option<(Option<String>, Option<u16>)> {
+        let value = value.to_str().ok()?;
+        for part in value.split(';') {
+            if part.trim_start().starts_with("host=") {
+                let host = part.trim_start_matches("host=").trim_matches('"');
+                return Some(parse_host_string(host));
+            }
+        }
+        None
+    }
+
+    fn parse_host_header(value: &http::HeaderValue) -> Option<(Option<String>, Option<u16>)> {
+        let value = value.to_str().ok()?;
+        Some(parse_host_string(value))
+    }
+
+    fn parse_host_string(host: &str) -> (Option<String>, Option<u16>) {
+        if let Ok(addr) = format!("{}:80", host).to_socket_addrs() {
+            if let Some(socket_addr) = addr.into_iter().next() {
+                return (Some(socket_addr.ip().to_string()), Some(socket_addr.port()));
+            }
+        }
+        let mut parts = host.splitn(2, ':');
+        let address = parts.next().map(String::from);
+        let port = parts.next().and_then(|p| p.parse().ok());
+        (address, port)
     }
 }
 
@@ -327,11 +377,9 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::{routing::get, Router};
     use http::StatusCode;
-    use opentelemetry::trace::{SpanId, SpanKind, Status, TracerProvider as trace};
-    use opentelemetry_sdk::trace::TracerProvider;
-    use opentelemetry_sdk::{
-        propagation::TraceContextPropagator, testing::trace::InMemorySpanExporter,
-    };
+    use opentelemetry::trace::{SpanId, SpanKind, Status, TracerProvider};
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+    use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::InMemorySpanExporter};
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
     use tracing::subscriber::DefaultGuard;
@@ -340,15 +388,14 @@ mod tests {
     fn init_test_tracer() -> (InMemorySpanExporter, DefaultGuard) {
         let exporter = InMemorySpanExporter::default();
 
-        let provider = TracerProvider::builder()
+        let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
         let tracer = provider.tracer("test-tracer");
-
+        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
         let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
         let subscriber = Registry::default().with(telemetry);
         let _guard = tracing::subscriber::set_default(subscriber);
-        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
         (exporter, _guard)
     }
@@ -359,14 +406,13 @@ mod tests {
 
         // TO DO : hide Arc impl details into the new methods ?
         // As Fn is a trait, we can't simply pass a Fn but hide it behind some kind of pointer (&, Box, Arc ...)
-        // So is it possible to simplify the signature ? Can't use & as we have lifetime issue and the value is moved
-        // into the arc, Box is possible but is the same is using an Arc for the caller
+        // So is it possible to simplify the signature ? Can't use & as we have lifetime issue(because Service is 'static)
+        // into the arc, Box is possible but is the same as using an Arc for the caller
         let logger = OtelLoggerLayer::default()
             .with_filter(Arc::new(|_req: &Parts| true))
             .with_span_attributes(Arc::new(|_req: &Parts| {
-                let mut vec: Vec<(&'static str, Box<dyn Value>)> = Vec::new();
-                vec.push(("my_value", Box::new("here")));
-                vec.push(("my.value2", Box::new("here")));
+                let mut vec: Vec<(&'static str, &'static str)> = Vec::new();
+                vec.push(("my_value", "here"));
                 vec
             }));
 
@@ -395,11 +441,7 @@ mod tests {
         );
         let client = reqwest::Client::builder()
             .default_headers(headers)
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION"),
-            ))
+            .user_agent("test-bot")
             .build()
             .unwrap();
 
@@ -418,6 +460,7 @@ mod tests {
         );
         assert_eq!(span.span_kind, SpanKind::Server);
         assert_eq!(span.status, Status::Unset);
+        assert_eq!(span.attributes.len(), 25);
 
         // ERROR path
         let uri = format!("http://{}/test_err", addr);
@@ -434,14 +477,16 @@ mod tests {
         );
         assert_eq!(span.span_kind, SpanKind::Server);
         assert_eq!(span.status, Status::Unset);
+        assert_eq!(span.attributes.len(), 26);
 
-        dbg!(&span.attributes.len());
+        //dbg!(&span.attributes);
+        //dbg!(&span.attributes);
         // for key_value in &span.attributes {
         //     let key = &key_value.key;
         //     let value = &key_value.value;
-        //     //if key.as_str() == "my_value" {
-        //     dbg!(value);
-        //     //}
+        //     if key.as_str() == "my_value2" {
+        //         dbg!(value);
+        //     }
         // }
     }
 
@@ -489,6 +534,7 @@ mod tests {
         );
         assert_eq!(span.span_kind, SpanKind::Server);
         assert_eq!(span.status, Status::Unset);
+        assert_eq!(span.attributes.len(), 23);
 
         // ERROR path
         let uri = format!("http://{}/test_err", addr);
@@ -505,5 +551,6 @@ mod tests {
         );
         assert_eq!(span.span_kind, SpanKind::Server);
         assert_eq!(span.status, Status::Unset);
+        assert_eq!(span.attributes.len(), 24);
     }
 }
