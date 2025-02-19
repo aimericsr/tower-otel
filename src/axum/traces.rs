@@ -204,7 +204,7 @@ where
 
         match response.map_err(Into::into) {
             Ok(mut response) => {
-                update_span_with_response_headers(response.headers(), &this.span);
+                update_span_with_response_headers(response.headers(), this.span);
                 inject_trace_id(response.headers_mut());
                 // let response_size = compute_approximate_response_size(&response);
                 // let response_body_size = compute_approximate_response_body_size(&response);
@@ -249,8 +249,8 @@ mod extract {
         let method = req.method().as_str();
         let span_name = format!("{method} {route}");
 
-        let (client_addr, client_port) = extract_client_conn_info(&req);
-        let (server_addr, server_port) = extract_server_conn_info(&req);
+        let (client_addr, client_port) = extract_client_conn_info(req);
+        let (server_addr, server_port) = extract_server_conn_info(req);
 
         let user_agent = req.headers().get(USER_AGENT).map(|v| v.to_str().unwrap());
 
@@ -275,7 +275,7 @@ mod extract {
             // http.request.size = http_request_size, // Experimental
             // http.request.body.size = http_request_body_size, // Experimental
             http.route = route,
-            url.shchema = "http",
+            url.scheme = "http",
             url.path = path,
             url.query = query,
             user_agent.original = user_agent,
