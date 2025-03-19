@@ -17,8 +17,8 @@ use tower::{BoxError, Layer, Service};
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-pub type SpanAttributes = Arc<dyn Fn(&Parts) -> Vec<(&'static str, &'static str)> + Send + Sync>;
-pub type Filter = Arc<dyn Fn(&Parts) -> bool + Send + Sync>;
+pub type SpanAttributes = fn(&Parts) -> Vec<(&'static str, &'static str)>;
+pub type Filter = fn(&Parts) -> bool;
 
 /// Add OTEL traces instrumentation to your reqwest client
 /// It extract informations from all outgoing HTTP request to create a span according to the
@@ -56,8 +56,8 @@ impl OtelLoggerLayer {
 impl Default for OtelLoggerLayer {
     fn default() -> Self {
         Self {
-            span_attributes: Arc::new(|_req: &Parts| Vec::new()),
-            is_recorded: Arc::new(|_req: &Parts| true),
+            span_attributes: |_req: &Parts| Vec::new(),
+            is_recorded: |_req: &Parts| true,
         }
     }
 }
@@ -321,12 +321,12 @@ mod tests {
         // So is it possible to simplify the signature ? Can't use & as we have lifetime issue(because Service is 'static)
         // into the arc, Box is possible but is the same as using an Arc for the caller
         let logger = OtelLoggerLayer::default()
-            .with_filter(Arc::new(|_req: &Parts| true))
-            .with_span_attributes(Arc::new(|_req: &Parts| {
+            .with_filter(|_req: &Parts| true)
+            .with_span_attributes(|_req: &Parts| {
                 let mut vec: Vec<(&'static str, &'static str)> = Vec::new();
                 vec.push(("my_value", "here"));
                 vec
-            }));
+            });
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(

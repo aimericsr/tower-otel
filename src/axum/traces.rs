@@ -4,21 +4,22 @@ use crate::helper::{
 use core::fmt;
 use extract::extract_otel_info_from_req;
 use http::{request::Parts, Request, Response};
+use opentelemetry::{baggage::BaggageExt, propagation::TextMapPropagator, KeyValue};
 use opentelemetry_http::HeaderExtractor;
+use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use pin_project_lite::pin_project;
 use std::{
     fmt::Debug,
     future::Future,
     pin::Pin,
-    sync::Arc,
     task::{ready, Context, Poll},
 };
 use tower::{BoxError, Layer, Service};
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-pub type SpanAttributes = Arc<dyn Fn(&Parts) -> Vec<(&'static str, &'static str)> + Send + Sync>;
-pub type Filter = Arc<dyn Fn(&Parts) -> bool + Send + Sync>;
+pub type SpanAttributes = fn(&Parts) -> Vec<(&'static str, &'static str)>;
+pub type Filter = fn(&Parts) -> bool;
 
 /// Add OTEL traces instrumentation to your axum app.
 /// It extract informations from the incoming HTTP request to create a span according to the
@@ -51,8 +52,8 @@ impl OtelLoggerLayer {
     /// Choose to record or not the incoming HTTP request based on his [`http::request::Parts`].
     pub fn with_filter(self, is_recorded: Filter) -> Self {
         OtelLoggerLayer {
-            span_attributes: self.span_attributes,
             is_recorded,
+            ..self
         }
     }
 
@@ -67,7 +68,7 @@ impl OtelLoggerLayer {
     pub fn with_span_attributes(self, span_attributes: SpanAttributes) -> Self {
         OtelLoggerLayer {
             span_attributes,
-            is_recorded: self.is_recorded,
+            ..self
         }
     }
 }
@@ -75,8 +76,8 @@ impl OtelLoggerLayer {
 impl Default for OtelLoggerLayer {
     fn default() -> Self {
         Self {
-            span_attributes: Arc::new(|_req: &Parts| Vec::new()),
-            is_recorded: Arc::new(|_req: &Parts| true),
+            span_attributes: |_req: &Parts| Vec::new(),
+            is_recorded: |_req: &Parts| true,
         }
     }
 }
@@ -165,6 +166,30 @@ where
         let context = opentelemetry::global::get_text_map_propagator(|propagator| {
             propagator.extract(&HeaderExtractor(request.headers()))
         });
+
+        // let propagator = TraceContextPropagator::new();
+        // let cx = propagator.extract(&HeaderExtractor(request.headers()));
+
+        // let propagator = BaggagePropagator::new();
+        // let cx2 = propagator.extract(&HeaderExtractor(request.headers()));
+
+        // let baggage_items = cx2
+        //     .baggage()
+        //     .iter()
+        //     .map(|(k, (v, m))| KeyValue::new(k.clone(), v.clone()).with_metadata(*m))
+        //     .collect::<Vec<_>>();
+
+        // let merged_cx = cx.with_baggage(baggage_items);
+
+        //cx.with_baggage(cx2.baggage().iter());
+
+        // dbg!(&cx);
+        // dbg!(&cx2);
+        //dbg!(&cx.baggage().get("user-id"));
+
+        // let propagator = BaggagePropagator::new();
+        // propagator.extract(&HeaderExtractor(request.headers()));
+
         span.set_parent(context);
 
         // The span is only enter inside the poll function of ResponseFuture.
@@ -392,7 +417,8 @@ mod tests {
             .with_simple_exporter(exporter.clone())
             .build();
         let tracer = provider.tracer("test-tracer");
-        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+        opentelemetry::global::set_text_map_propagator(BaggagePropagator::new());
+        //opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
         let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
         let subscriber = Registry::default().with(telemetry);
         let _guard = tracing::subscriber::set_default(subscriber);
@@ -404,17 +430,13 @@ mod tests {
     async fn test_with_span_id() {
         let (exporter, _guard) = init_test_tracer();
 
-        // TO DO : hide Arc impl details into the new methods ?
-        // As Fn is a trait, we can't simply pass a Fn but hide it behind some kind of pointer (&, Box, Arc ...)
-        // So is it possible to simplify the signature ? Can't use & as we have lifetime issue(because Service is 'static)
-        // into the arc, Box is possible but is the same as using an Arc for the caller
         let logger = OtelLoggerLayer::default()
-            .with_filter(Arc::new(|_req: &Parts| true))
-            .with_span_attributes(Arc::new(|_req: &Parts| {
+            .with_filter(|_req: &Parts| true)
+            .with_span_attributes(|_req: &Parts| {
                 let mut vec: Vec<(&'static str, &'static str)> = Vec::new();
                 vec.push(("my_value", "here"));
                 vec
-            }));
+            });
 
         let routes = Router::new()
             .route("/test_ok", get(|| async { StatusCode::OK.into_response() }))
@@ -439,6 +461,10 @@ mod tests {
                 "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
             ),
         );
+        headers.insert(
+            "baggage",
+            reqwest::header::HeaderValue::from_static("user-id=12345,role=admin"),
+        );
         let client = reqwest::Client::builder()
             .default_headers(headers)
             .user_agent("test-bot")
@@ -460,7 +486,7 @@ mod tests {
         );
         assert_eq!(span.span_kind, SpanKind::Server);
         assert_eq!(span.status, Status::Unset);
-        assert_eq!(span.attributes.len(), 25);
+        assert_eq!(span.attributes.len(), 26);
 
         // ERROR path
         let uri = format!("http://{}/test_err", addr);
@@ -477,7 +503,7 @@ mod tests {
         );
         assert_eq!(span.span_kind, SpanKind::Server);
         assert_eq!(span.status, Status::Unset);
-        assert_eq!(span.attributes.len(), 26);
+        assert_eq!(span.attributes.len(), 27);
 
         //dbg!(&span.attributes);
         //dbg!(&span.attributes);
