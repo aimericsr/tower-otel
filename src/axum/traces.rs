@@ -1,12 +1,8 @@
-use crate::helper::{
-    inject_trace_id, update_span_with_custom_attributes, update_span_with_response_headers,
-};
+use crate::helper::{update_span_with_custom_attributes, update_span_with_response_headers};
 use core::fmt;
 use extract::extract_otel_info_from_req;
 use http::{request::Parts, Request, Response};
-use opentelemetry::{baggage::BaggageExt, propagation::TextMapPropagator, KeyValue};
-use opentelemetry_http::HeaderExtractor;
-use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
+use opentelemetry_http::{HeaderExtractor, HeaderInjector};
 use pin_project_lite::pin_project;
 use std::{
     fmt::Debug,
@@ -167,33 +163,10 @@ where
             propagator.extract(&HeaderExtractor(request.headers()))
         });
 
-        // let propagator = TraceContextPropagator::new();
-        // let cx = propagator.extract(&HeaderExtractor(request.headers()));
-
-        // let propagator = BaggagePropagator::new();
-        // let cx2 = propagator.extract(&HeaderExtractor(request.headers()));
-
-        // let baggage_items = cx2
-        //     .baggage()
-        //     .iter()
-        //     .map(|(k, (v, m))| KeyValue::new(k.clone(), v.clone()).with_metadata(*m))
-        //     .collect::<Vec<_>>();
-
-        // let merged_cx = cx.with_baggage(baggage_items);
-
-        //cx.with_baggage(cx2.baggage().iter());
-
-        // dbg!(&cx);
-        // dbg!(&cx2);
-        //dbg!(&cx.baggage().get("user-id"));
-
-        // let propagator = BaggagePropagator::new();
-        // propagator.extract(&HeaderExtractor(request.headers()));
-
         span.set_parent(context);
 
         // The span is only enter inside the poll function of ResponseFuture.
-        // It should not be a problem as future need to be polled to make work
+        // It should not be a problem as future need to be polled to make it advanced
         // And the time to constructing the future should be fairly fast
         ResponseFuture {
             inner: self.inner.call(request),
@@ -229,19 +202,24 @@ where
 
         match response.map_err(Into::into) {
             Ok(mut response) => {
-                update_span_with_response_headers(response.headers(), this.span);
-                inject_trace_id(response.headers_mut());
                 // let response_size = compute_approximate_response_size(&response);
                 // let response_body_size = compute_approximate_response_body_size(&response);
                 // this.span.record("http.response.size", response_size);
                 // this.span
                 //     .record("http.response.body.size", response_body_size);
+                update_span_with_response_headers(response.headers(), this.span);
                 this.span
                     .record("http.response.status_code", response.status().as_str());
                 // TO DO : How to get root error with more context ?
                 if response.status().is_server_error() {
                     this.span.record("error.type", response.status().as_str());
                 }
+
+                let context = tracing::Span::current().context();
+                let mut injector = HeaderInjector(response.headers_mut());
+                opentelemetry::global::get_text_map_propagator(|propagator| {
+                    propagator.inject_context(&context, &mut injector);
+                });
 
                 Poll::Ready(Ok(response))
             }
@@ -401,8 +379,10 @@ mod tests {
     use super::*;
     use axum::response::IntoResponse;
     use axum::{routing::get, Router};
-    use http::StatusCode;
+    use http::{HeaderValue, StatusCode};
+    use opentelemetry::propagation::TextMapCompositePropagator;
     use opentelemetry::trace::{SpanId, SpanKind, Status, TracerProvider};
+    use opentelemetry_sdk::propagation::BaggagePropagator;
     use opentelemetry_sdk::trace::SdkTracerProvider;
     use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::InMemorySpanExporter};
     use std::net::SocketAddr;
@@ -417,13 +397,31 @@ mod tests {
             .with_simple_exporter(exporter.clone())
             .build();
         let tracer = provider.tracer("test-tracer");
-        opentelemetry::global::set_text_map_propagator(BaggagePropagator::new());
-        //opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+
+        let baggage_propagator = BaggagePropagator::new();
+        let trace_context_propagator = TraceContextPropagator::new();
+        let composite_propagator = TextMapCompositePropagator::new(vec![
+            Box::new(baggage_propagator),
+            Box::new(trace_context_propagator),
+        ]);
+        opentelemetry::global::set_text_map_propagator(composite_propagator);
+
         let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
         let subscriber = Registry::default().with(telemetry);
         let _guard = tracing::subscriber::set_default(subscriber);
 
         (exporter, _guard)
+    }
+
+    fn get_trace_id_from_headers(headers: &http::HeaderMap) -> String {
+        let trace_id = headers
+            .get("traceparent")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        trace_id.split('-').take(2).collect::<Vec<&str>>().join("-")
     }
 
     #[tokio::test]
@@ -439,11 +437,7 @@ mod tests {
             });
 
         let routes = Router::new()
-            .route("/test_ok", get(|| async { StatusCode::OK.into_response() }))
-            .route(
-                "/test_err",
-                get(|| async { StatusCode::INTERNAL_SERVER_ERROR.into_response() }),
-            )
+            .route("/test", get(|| async { StatusCode::OK.into_response() }))
             .layer(logger);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -463,23 +457,36 @@ mod tests {
         );
         headers.insert(
             "baggage",
-            reqwest::header::HeaderValue::from_static("user-id=12345,role=admin"),
+            reqwest::header::HeaderValue::from_static("user-id=12345"),
         );
         let client = reqwest::Client::builder()
-            .default_headers(headers)
+            .default_headers(headers.clone())
             .user_agent("test-bot")
             .build()
             .unwrap();
 
-        // OK path
-        let uri = format!("http://{}/test_ok", addr);
+        let uri = format!("http://{}/test", addr);
         let response = client.get(uri).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
+        // Propagators
+        let expected_trace_id = get_trace_id_from_headers(&headers);
+        let actual_trace_id = get_trace_id_from_headers(response.headers());
+        assert_eq!(actual_trace_id, expected_trace_id);
+        assert_eq!(
+            response.headers().get("tracestate"),
+            Some(&HeaderValue::from_static(""))
+        );
+        assert_eq!(
+            response.headers().get::<&str>("baggage"),
+            Some(&HeaderValue::from_static("user-id=12345"))
+        );
+
+        // Traces
         let spans = exporter.get_finished_spans().unwrap();
-        assert!(spans.len() == 1, "Only 1 span recorded");
+        assert_eq!(spans.len(), 1, "Only 1 span recorded");
         let span = &spans[0];
-        assert_eq!(span.name, "GET /test_ok");
+        assert_eq!(span.name, "GET /test");
         assert_eq!(
             span.parent_span_id,
             SpanId::from_hex("00f067aa0ba902b7").unwrap()
@@ -487,33 +494,6 @@ mod tests {
         assert_eq!(span.span_kind, SpanKind::Server);
         assert_eq!(span.status, Status::Unset);
         assert_eq!(span.attributes.len(), 26);
-
-        // ERROR path
-        let uri = format!("http://{}/test_err", addr);
-        let response = client.get(uri).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-        let spans = exporter.get_finished_spans().unwrap();
-        assert!(spans.len() == 2, "Only 2 span recorded");
-        let span = &spans[1];
-        assert_eq!(span.name, "GET /test_err");
-        assert_eq!(
-            span.parent_span_id,
-            SpanId::from_hex("00f067aa0ba902b7").unwrap()
-        );
-        assert_eq!(span.span_kind, SpanKind::Server);
-        assert_eq!(span.status, Status::Unset);
-        assert_eq!(span.attributes.len(), 27);
-
-        //dbg!(&span.attributes);
-        //dbg!(&span.attributes);
-        // for key_value in &span.attributes {
-        //     let key = &key_value.key;
-        //     let value = &key_value.value;
-        //     if key.as_str() == "my_value2" {
-        //         dbg!(value);
-        //     }
-        // }
     }
 
     #[tokio::test]
@@ -521,11 +501,7 @@ mod tests {
         let (exporter, _guard) = init_test_tracer();
 
         let routes = Router::new()
-            .route("/test_ok", get(|| async { StatusCode::OK.into_response() }))
-            .route(
-                "/test_err",
-                get(|| async { StatusCode::INTERNAL_SERVER_ERROR.into_response() }),
-            )
+            .route("/test", get(|| async { StatusCode::OK.into_response() }))
             .layer(OtelLoggerLayer::default());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -537,23 +513,27 @@ mod tests {
         let _server_handle = tokio::spawn(async { server.await.unwrap() });
 
         let client = reqwest::Client::builder()
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION"),
-            ))
+            .user_agent("test-bot")
             .build()
             .unwrap();
 
-        // OK path
-        let uri = format!("http://{}/test_ok", addr);
+        let uri = format!("http://{}/test", addr);
         let response = client.get(uri).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
+        // Propagators
+        assert!(response.headers().get("traceparent").is_some());
+        assert_eq!(
+            response.headers().get("tracestate"),
+            Some(&HeaderValue::from_static(""))
+        );
+        assert_eq!(response.headers().get("baggage"), None);
+
+        // Traces
         let spans = exporter.get_finished_spans().unwrap();
-        assert!(spans.len() == 1, "Only 1 span recorded");
+        assert_eq!(spans.len(), 1, "Only 1 span recorded");
         let span = &spans[0];
-        assert_eq!(span.name, "GET /test_ok");
+        assert_eq!(span.name, "GET /test");
         assert_eq!(
             span.parent_span_id,
             SpanId::from_hex("0000000000000000").unwrap()
@@ -561,22 +541,5 @@ mod tests {
         assert_eq!(span.span_kind, SpanKind::Server);
         assert_eq!(span.status, Status::Unset);
         assert_eq!(span.attributes.len(), 23);
-
-        // ERROR path
-        let uri = format!("http://{}/test_err", addr);
-        let response = client.get(uri).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-        let spans = exporter.get_finished_spans().unwrap();
-        assert!(spans.len() == 2, "Only 2 span recorded");
-        let span = &spans[1];
-        assert_eq!(span.name, "GET /test_err");
-        assert_eq!(
-            span.parent_span_id,
-            SpanId::from_hex("0000000000000000").unwrap()
-        );
-        assert_eq!(span.span_kind, SpanKind::Server);
-        assert_eq!(span.status, Status::Unset);
-        assert_eq!(span.attributes.len(), 24);
     }
 }

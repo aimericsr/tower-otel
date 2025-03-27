@@ -1,19 +1,6 @@
 use http::HeaderMap;
-use opentelemetry_http::HeaderInjector;
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-/// Inject OTEL information into the response
-///
-/// Can be use to propagat OTEL trace id between distributed services
-pub fn inject_trace_id(headers: &mut http::HeaderMap) {
-    let context = tracing::Span::current().context();
-
-    let mut injector = HeaderInjector(headers);
-    opentelemetry::global::get_text_map_propagator(|propagator| {
-        propagator.inject_context(&context, &mut injector);
-    });
-}
 
 /// Update span with response headers
 ///
